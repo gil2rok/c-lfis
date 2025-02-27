@@ -36,9 +36,9 @@ def target_logdensity_fn(x: Array) -> Float:
     )
 
 
-def marginal_logdensity_fn(x: Array, time: Float) -> Float:
-    """Time-dependent probability logdensity that linearly interpolates btwn
-    a base distribution and an unnormalized target distribution."""
+def probability_path_logdensity_fn(x: Array, time: Float) -> Float:
+    """Logdensity of time-dependent probability path that linearly interpolates 
+    btwn a base distribution and an unnormalized target distribution."""
     return (1 - time) * base_logdensity_fn(x) + time * target_logdensity_fn(x)
 
 
@@ -68,7 +68,7 @@ def step(
     rng_key: Key,
     state: LFISState,
     time: Float,
-    marginal_logdensity_fn: Callable,
+    probability_path_logdensity_fn: Callable,
     optimizer: GradientTransformation,
     static: PyTree,
     num_samples: int = 1,
@@ -87,8 +87,8 @@ def step(
           """Clean way to add batch dimension (of size `num_samples`) for multiple computations."""
           vel = velocity(x_t) # (dim)
           div = divergence(velocity)(x_t)  # (1,)
-          score = jax.grad(marginal_logdensity_fn, argnums=0)(x_t, time)  # (dim)
-          time_partial = jax.grad(marginal_logdensity_fn, argnums=1)(x_t, time)  # (1,)
+          score = jax.grad(probability_path_logdensity_fn, argnums=0)(x_t, time)  # (dim)
+          time_partial = jax.grad(probability_path_logdensity_fn, argnums=1)(x_t, time)  # (1,)
           return vel, div, score, time_partial
 
         vel, div, score, time_partial = jax.vmap(vmap_me_plz)(x_t, time)
@@ -145,7 +145,7 @@ def main():
                 step_key,
                 state,
                 time,
-                marginal_logdensity_fn,
+                probability_path_logdensity_fn,
                 optimizer,
                 static,
                 num_samples,
