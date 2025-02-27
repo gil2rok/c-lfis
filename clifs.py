@@ -78,6 +78,8 @@ def step(
         """Compute mean of squared continuity error."""
         # TODO: compute partial_t_Z once per time step instead of every train step
         # requires computing partial_t_Z in first loop of main() and passing it as an arg
+        # TODO: put sample code (and not-yet-implemented importance reweighting) outside of 
+        # continuity error function; change signature to `continuity_error(params, x_t, time)`
         velocity = eqx.combine(params, static)
         x_t = sample(rng_key, time, velocity, base_sample_fn, num_samples)  # (num_samples, dim)
 
