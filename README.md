@@ -1,2 +1,2 @@
 # c-lfis
-Experimenting with Consistent Neural Samplers
+Experimenting with *consistent* neural samplers 🧠 🌀, inspired by the Liouville Flow Importance Sampler (LFIS).
