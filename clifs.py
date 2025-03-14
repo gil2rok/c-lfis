@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import jax.scipy as jsp
 import matplotlib.pyplot as plt
-from jaxtyping import Array, Float, Key, PyTree, Scalar
+from jaxtyping import Array, Key, PyTree, Scalar
 from optax import GradientTransformation, OptState
 
 
@@ -16,7 +16,7 @@ jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
 dim = 2
 
 
-def base_logdensity_fn(x: Array) -> Float:
+def base_logdensity_fn(x: Array) -> Scalar:
     return jsp.stats.multivariate_normal.logpdf(x, jnp.zeros(dim), jnp.eye(dim))
 
 
@@ -26,7 +26,7 @@ def base_sample_fn(rng_key: Key, num_samples: int = 1) -> Array:
     )
 
 
-def target_logdensity_fn(x: Array) -> Float:
+def target_logdensity_fn(x: Array) -> Scalar:
     assert x.shape[-1] == 2 
     m1 = jsp.stats.multivariate_normal.logpdf(x, jnp.array([2.0, 2.0]), jnp.eye(2))
     m2 = jsp.stats.multivariate_normal.logpdf(x, jnp.array([-2.0, -2.0]), jnp.eye(2))
@@ -37,13 +37,13 @@ def target_logdensity_fn(x: Array) -> Float:
     return jsp.special.logsumexp(log_mixtures + log_weights)
 
 
-def probability_path_logdensity_fn(x: Array, time: Float) -> Float:
+def probability_path_logdensity_fn(x: Array, time: Scalar) -> Scalar:
     """Logdensity of time-dependent probability path that linearly interpolates 
     btwn a base distribution and an unnormalized target distribution."""
     return (1 - time) * base_logdensity_fn(x) + time * target_logdensity_fn(x)
 
 
-def divergence(fn: Callable[[Array], Array]) -> Callable[[Array], Float]:
+def divergence(fn: Callable[[Array], Array]) -> Callable[[Array], Scalar]:
     """Compute the divergence of a vector field for calleable fn: R^d -> R^d.
 
     Code from: https://github.com/jax-ml/jax/issues/3022#issuecomment-2100553108.
@@ -79,8 +79,8 @@ class Velocity(eqx.Module):
         )
         
     def __call__(self, x: Array, time: Scalar) -> Array:
-        # expand time from JAX scalar () to 1D array (1,) for vmap-compatible concatenation
-        expanded_time = jnp.expand_dims(time, axis=-1)
+        # TODO: confirm expand_dims along axis=-1 (instead of axis=0)
+        expanded_time = jnp.expand_dims(time, axis=-1) # ensures vmap-compatible concatenation
         inputs = jnp.concatenate([x, expanded_time], axis=-1)
         return self.mlp(inputs)
 
@@ -94,7 +94,7 @@ class LFISInfo(NamedTuple):
     loss: Array
 
 
-def init(params: PyTree, optimizer: GradientTransformation):
+def init(params: PyTree, optimizer: GradientTransformation) -> LFISState:
     opt_state = optimizer.init(params)
     return LFISState(params=params, opt_state=opt_state)
 
@@ -108,16 +108,16 @@ def step(
     optimizer: GradientTransformation,
     static: PyTree,
     num_samples: int = 1,
-):
+) -> tuple[LFISState, LFISInfo]:
     velocity = eqx.combine(state.params, static)
     x_t = sample(rng_key, time, velocity, base_sample_fn, num_samples)  # shape (num_samples, dim)
         
-    def continuity_error(params: PyTree, x_t: Array, time: Scalar):
+    def continuity_error(params: PyTree, x_t: Array, time: Scalar) -> Scalar:
         """Compute (squared) error in continuity equation at time t averaged over 
         multiple locations x_t ~ p_t."""
         velocity = eqx.combine(params, static)
 
-        def vmap_me_plz(x_t: Array, time: Scalar):
+        def vmap_me_plz(x_t: Array, time: Scalar) -> tuple:
           """Clean way to batch/vmap multiple computations."""
           vel = velocity(x_t, time) # shape (dim,)
           div = divergence(lambda x: velocity(x, time))(x_t)  # shape ()
@@ -142,7 +142,7 @@ def sample(
     velocity: Callable,
     base_sample_fn: Callable,
     num_samples: int = 1,
-):
+) -> Array:
     x_0 = base_sample_fn(rng_key, num_samples) # shape (num_samples, dim)
     num_time_steps = 25
     dt = 1 / num_time_steps
@@ -159,7 +159,7 @@ def sample(
     return jax.vmap(euler_integrator, in_axes=(0, None))(x_0, time)
 
 
-def main(seed, num_time_steps, num_train_steps, num_samples):
+def main(seed: int, num_time_steps: int, num_train_steps: int, num_samples: int):
     rng_key = jr.key(seed)
     rng_key, nn_key = jr.split(rng_key, 2)
     
