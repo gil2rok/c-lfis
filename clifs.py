@@ -13,8 +13,8 @@ from optax import GradientTransformation, OptState
 
 
 jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
-
 dim = 2
+
 
 def base_logdensity_fn(x: Array) -> Float:
     return jsp.stats.multivariate_normal.logpdf(x, jnp.zeros(dim), jnp.eye(dim))
@@ -51,13 +51,47 @@ def divergence(fn: Callable[[Array], Array]) -> Callable[[Array], Float]:
     return lambda x: jnp.trace(jax.jacobian(fn)(x))
 
 
+class Velocity(eqx.Module):
+    """Wrapper class for eqx.nn.MLP to allow input of two arguments instead of one. 
+    
+    This velocity MLP operates on both location x and time t. Instead of concatenating
+    them as a single input, we pass them as separate arguments to the MLP. This is 
+    helpful for (1) better semantics and (2) easier to differentiate with respect to 
+    x and time separately.
+    """
+    mlp: eqx.nn.MLP
+    
+    def __init__(
+        self, 
+        in_size: int, 
+        out_size: int, 
+        width_size: int = 64, 
+        depth: int = 2,
+        *,
+        key: Key
+    ):
+        self.mlp = eqx.nn.MLP(
+            in_size=in_size,
+            out_size=out_size,
+            width_size=width_size,
+            depth=depth,
+            key=key,
+        )
+        
+    def __call__(self, x: Array, time: Scalar) -> Array:
+        # expand time from JAX scalar () to 1D array (1,) for vmap-compatible concatenation
+        expanded_time = jnp.expand_dims(time, axis=-1)
+        inputs = jnp.concatenate([x, expanded_time], axis=-1)
+        return self.mlp(inputs)
+
+
 class LFISState(NamedTuple):
     params: PyTree
     opt_state: OptState
 
 
 class LFISInfo(NamedTuple):
-    loss: Float
+    loss: Array
 
 
 def init(params: PyTree, optimizer: GradientTransformation):
@@ -77,13 +111,13 @@ def step(
 ):
     velocity = eqx.combine(state.params, static)
     x_t = sample(rng_key, time, velocity, base_sample_fn, num_samples)  # shape (num_samples, dim)
-    
+        
     def continuity_error(params: PyTree, x_t: Array, time: Scalar):
         """Compute (squared) error in continuity equation at time t averaged over 
-        multiple locations x_t ~ p_t. See https://en.wikipedia.org/wiki/Continuity_equation."""
+        multiple locations x_t ~ p_t."""
         velocity = eqx.combine(params, static)
 
-        def vmap_me_plz(x_t, time):
+        def vmap_me_plz(x_t: Array, time: Scalar):
           """Clean way to batch/vmap multiple computations."""
           vel = velocity(x_t, time) # shape (dim,)
           div = divergence(lambda x: velocity(x, time))(x_t)  # shape ()
@@ -100,25 +134,6 @@ def step(
     updates, new_opt_state = optimizer.update(grads, state.opt_state)
     new_params = optax.apply_updates(state.params, updates)
     return LFISState(params=new_params, opt_state=new_opt_state), LFISInfo(loss=loss)
-
-
-# def _sample(
-#     rng_key: Key,
-#     time: Scalar,
-#     velocity: Callable,
-#     base_sample_fn: Callable,
-#     num_samples: int = 1,
-# ):
-#     x_0 = base_sample_fn(rng_key, num_samples) # shape (num_samples, dim)
-#     num_time_steps = 25
-#     dt = 1 / num_time_steps
-    
-#     def euler_step(x, time):
-#         return x + dt * velocity(x, time), _
-    
-#     time_steps = jnp.arange(1, num_time_steps + 1) / num_time_steps
-#     euler_integrator = lambda x0, time_steps: jax.lax.scan(euler_step, x0, time_steps)
-#     return jax.vmap(euler_integrator, in_axes=(0, None))(x_0, time_steps)
 
 
 def sample(
@@ -147,20 +162,8 @@ def sample(
 def main(seed, num_time_steps, num_train_steps, num_samples):
     rng_key = jr.key(seed)
     rng_key, nn_key = jr.split(rng_key, 2)
-
-    velocity_mlp = eqx.nn.MLP(
-        in_size=dim + 1,
-        out_size=dim,
-        width_size=64,
-        depth=2,
-        key=nn_key,
-    )
     
-    # extend time from JAX scalar () to 1D array (1,) for vmap-compatible concatenation
-    velocity = lambda x, time: velocity_mlp(
-        jnp.concatenate([x, jnp.expand_dims(time, axis=-1)]) # TODO: confirm axis=-1
-    )
-
+    velocity = Velocity(in_size=dim + 1, out_size=dim, key=nn_key)
     params, static = eqx.partition(velocity, eqx.is_inexact_array)
     optimizer = optax.adam(1e-3)
     state = init(params, optimizer)
@@ -183,7 +186,6 @@ def main(seed, num_time_steps, num_train_steps, num_samples):
             )
             if j % 25 == 0:
                 print(f"Step {j} Loss: {info.loss}")
-        break
 
     # generate approximate samples and plot them
     rng_key, sub_key = jr.split(rng_key)
@@ -197,7 +199,7 @@ def main(seed, num_time_steps, num_train_steps, num_samples):
 if __name__ == "__main__":
     seed = 12345
     num_time_steps = 25
-    num_train_steps = 2000
-    num_samples = 1
+    num_train_steps = 500
+    num_samples = 1000
     
     main(seed, num_time_steps, num_train_steps, num_samples)
