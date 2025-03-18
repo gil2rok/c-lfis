@@ -34,6 +34,7 @@ def target_logdensity_fn(x: Array) -> Scalar:
     m4 = jsp.stats.multivariate_normal.logpdf(x, jnp.array([-2.0, 2.0]), jnp.eye(2))
     log_mixtures = jnp.array([m1, m2, m3, m4])
     log_weights = jnp.log(jnp.array([0.25, 0.25, 0.25, 0.25]))
+    assert log_mixtures.ndim == 1
     return jsp.special.logsumexp(log_mixtures + log_weights)
 
 
@@ -46,6 +47,7 @@ def probability_path_logdensity_fn(x: Array, time: Scalar) -> Scalar:
 def divergence(fn: Callable[[Array], Array]) -> Callable[[Array], Scalar]:
     """Compute the divergence of a vector field for calleable fn: R^d -> R^d.
 
+    Naive implementation computes entire Jacobian even though only diagonal is needed.
     Code from: https://github.com/jax-ml/jax/issues/3022#issuecomment-2100553108.
     """
     return lambda x: jnp.trace(jax.jacobian(fn)(x))
@@ -57,7 +59,7 @@ class Velocity(eqx.Module):
     This velocity MLP operates on both location x and time t. Instead of concatenating
     them as a single input, we pass them as separate arguments to the MLP. This is 
     helpful for (1) better semantics and (2) easier to differentiate with respect to 
-    x and time separately.
+    location x and time t separately.
     """
     mlp: eqx.nn.MLP
     
@@ -65,8 +67,8 @@ class Velocity(eqx.Module):
         self, 
         in_size: int, 
         out_size: int, 
-        width_size: int = 64, 
-        depth: int = 2,
+        width_size: int = 256, # previously 64
+        depth: int = 8, # previously 2
         *,
         key: Key
     ):
@@ -131,6 +133,7 @@ def step(
         return jnp.mean(eps**2, axis=0)
 
     loss, grads = jax.value_and_grad(continuity_error)(state.params, x_t, time)
+    assert grads is not None
     updates, new_opt_state = optimizer.update(grads, state.opt_state)
     new_params = optax.apply_updates(state.params, updates)
     return LFISState(params=new_params, opt_state=new_opt_state), LFISInfo(loss=loss)
@@ -139,20 +142,19 @@ def step(
 def sample(
     rng_key: Key,
     time: Scalar,
-    velocity: Callable,
+    velocity: eqx.Module,
     base_sample_fn: Callable,
     num_samples: int = 1,
 ) -> Array:
     x_0 = base_sample_fn(rng_key, num_samples) # shape (num_samples, dim)
-    num_time_steps = 25
-    dt = 1 / num_time_steps
+    dt = 0.02
     
     def euler_step(x, time):
         return x + dt * velocity(x, time)
     
     euler_integrator = lambda x0, time: jax.lax.fori_loop(
         lower=1,
-        upper=jnp.array(time * num_time_steps, dtype=int),
+        upper=1 + jnp.array(time / dt, dtype=int),
         body_fun=lambda i, x: euler_step(x, i / num_time_steps),
         init_val=x0
     )
@@ -170,8 +172,9 @@ def main(seed: int, num_time_steps: int, num_train_steps: int, num_samples: int)
 
     for i in range(num_time_steps):
         time_key = jr.fold_in(rng_key, i)
-        time = jnp.array((i + 1) / num_time_steps) # shape ()
-        print(f"\nTime: {(i + 1) / num_time_steps}")
+        time = jr.uniform(time_key) # shape ()
+        # time = jnp.array((i + 1) / num_time_steps) # shape ()
+        print(f"\nIter {i} at time: {time}")
 
         for j in range(num_train_steps):
             step_key = jr.fold_in(time_key, j)
@@ -185,21 +188,20 @@ def main(seed: int, num_time_steps: int, num_train_steps: int, num_samples: int)
                 num_samples,
             )
             if j % 25 == 0:
-                print(f"Step {j} Loss: {info.loss}")
+                print(f"Step {j} Loss: {info.loss}\tGrad Norm: {info.grad_norm}")
 
     # generate approximate samples and plot them
     rng_key, sub_key = jr.split(rng_key)
     velocity = eqx.combine(state.params, static)
     approx_samples = sample(sub_key, 1, velocity, base_sample_fn, num_samples)
-
     sns.scatterplot(x=approx_samples[:, 0], y=approx_samples[:, 1], alpha=0.5)
     plt.savefig('hist.png', dpi=300)
 
 
 if __name__ == "__main__":
     seed = 12345
-    num_time_steps = 25
-    num_train_steps = 500
+    num_time_steps = 200
+    num_train_steps = 250
     num_samples = 1000
     
     main(seed, num_time_steps, num_train_steps, num_samples)
