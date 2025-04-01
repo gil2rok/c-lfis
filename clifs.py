@@ -38,20 +38,6 @@ def target_logdensity_fn(x: Array) -> Scalar:
     return jsp.special.logsumexp(log_mixtures + log_weights)
 
 
-def target_sample_fn(rng_key: Key, num_samples: int = 1) -> Array:
-    m1_key, m2_key, m3_key, m4_key, cat_key = jr.split(rng_key, 5)
-    m1 = jr.multivariate_normal(m1_key, jnp.array([2.0, 2.0]), jnp.eye(2), (num_samples,))
-    m2 = jr.multivariate_normal(m2_key, jnp.array([-2.0, -2.0]), jnp.eye(2), (num_samples,))
-    m3 = jr.multivariate_normal(m3_key, jnp.array([2.0, -2.0]), jnp.eye(2), (num_samples,))
-    m4 = jr.multivariate_normal(m4_key, jnp.array([-2.0, 2.0]), jnp.eye(2), (num_samples,))
-    mixtures = jnp.stack([m1, m2, m3, m4], axis=0)  # shape (4, num_samples, dim)
-    log_weights = jnp.array([0.25, 0.25, 0.25, 0.25])
-    categories = jr.categorical(cat_key, logits=log_weights, shape=(num_samples,))
-    one_hot_categories = jax.nn.one_hot(categories, num_classes=4) # shape (num_samples, 4)
-    # TODO: multiply mixtures by one-hot categories to get final samples
-    return None
-
-
 def probability_path_logdensity_fn(x: Array, time: Scalar) -> Scalar:
     """Logdensity of time-dependent probability path that linearly interpolates 
     btwn a base distribution and an unnormalized target distribution."""
@@ -111,38 +97,6 @@ class LFISState(NamedTuple):
 class LFISInfo(NamedTuple):
     loss: Array
     x_t: Array
-    
-
-class LFISMetrics(NamedTuple):
-    wasserstein_distance: Array
-    true_continuity_error: Array
-    approx_continuity_error: Array
-
-
-def compute_1D_wasserstein_distance(X, Y):
-    """Efficiently compute 1D Wasserstein distance between two point clouds."""
-    return jnp.mean(jnp.abs(jnp.sort(X, axis=0) - jnp.sort(Y, axis=0)))
-    
-    
-def metrics(rng_key, LFISState, LFISInfo) -> LFISMetrics:
-    target_key, approx_key = jr.split(rng_key, 2)
-    num_samples = LFISInfo.x_t.shape[0]
-    target_samples = target_sample_fn(target_key, num_samples)
-    approx_samples = sample(
-        approx_key, 1, LFISState.params, LFISState.static, base_sample_fn, num_samples
-    )
-    wasserstein_distance = compute_1D_wasserstein_distance(target_samples, approx_samples)
-    true_continuity_error = continuity_error(
-        LFISState.params, LFISState.static, target_samples, 1.0
-    )
-    approx_continuity_error = continuity_error(
-        LFISState.params, LFISState.static, approx_samples, 1.0
-    )
-    return LFISMetrics(
-        wasserstein_distance=wasserstein_distance,
-        true_continuity_error=true_continuity_error,
-        approx_continuity_error=approx_continuity_error,
-    )   
 
 
 def init(params: PyTree, optimizer: GradientTransformation) -> LFISState:
@@ -222,30 +176,6 @@ def sample(
         init_val=x_0,
     )
     return x_t
-
-
-def _sample(
-    rng_key: Key,
-    time: Scalar,
-    params: PyTree,
-    static: PyTree,
-    base_sample_fn: Callable,
-    num_samples: int = 1,
-    delta_t: Scalar = 0.02,
-) -> Array:
-    x_0 = base_sample_fn(rng_key, num_samples) # shape (num_samples, dim)
-    velocity = eqx.combine(params, static)
-    
-    def euler_step(x, time):
-        return x + delta_t * velocity(x, time)
-    
-    euler_integrator = lambda x0, time: jax.lax.fori_loop(
-        lower=1,
-        upper=1 + jnp.array(time / delta_t, dtype=int),
-        body_fun=lambda i, x: euler_step(x, i / num_time_steps),
-        init_val=x0
-    )
-    return jax.vmap(euler_integrator, in_axes=(0, None))(x_0, time)
 
 
 def main(seed: int, num_time_steps: int, num_train_steps: int, num_samples: int):
