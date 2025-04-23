@@ -8,7 +8,7 @@ import jax.random as jr
 from jaxtyping import Array, Key, PyTree, Scalar
 from optax import GradientTransformation, OptState
 
-from utils import continuity_error
+from utils import continuity_error, euler_step
 
 
 class LFISAlgorithm(NamedTuple):
@@ -53,7 +53,7 @@ def step(
         base_sample_fn=base_sample_fn, 
         num_samples=num_samples, 
     )  # shape (num_samples, dim)
-    
+        
     def continuity_error_loss_fn(params: PyTree) -> Scalar:
         """Mean squared error in continuity equation at time t."""
         eps = continuity_error(
@@ -85,17 +85,22 @@ def sample(
     """Evolve samples from x_0 ~ p_0 to x_t ~ p_t using neural velocity field."""
     x_0 = base_sample_fn(rng_key, num_samples) # shape (num_samples, dim)
     velocity = eqx.combine(params, static)
-    euler_step = lambda x_t, time, delta_t: x_t + delta_t * velocity(x_t, time)
-    vmap_euler_step = jax.vmap(euler_step, in_axes=(0, None, None))
+    vmap_numerical_integration_step = jax.vmap(
+        euler_step, in_axes=(None, 0, None, None)
+    )
     
     def body_fn(time, carry, delta_t):
         """Apply numerical integration step from time t to time t + delta_t."""
         x_t = carry
-        x_t = vmap_euler_step(x_t, time, delta_t)
+        x_t = vmap_numerical_integration_step(velocity, x_t, time, delta_t)
         return x_t
     
     def body_fn_wrapper(time_idx, carry):
-        """Convert time index to time and handle adaptive final integration step."""
+        """Convert time index to time and handle adaptive final integration step.
+        
+        Each step for numerical integration is of size delta_t, except for the last 
+        one which is adaptively computed as `min(cur_time + delta_t, time)`.
+        """
         cur_time = (time_idx - 1) * delta_t
         next_time = jnp.minimum(time_idx * delta_t, time)
         adaptive_delta_t = next_time - cur_time
@@ -117,6 +122,7 @@ def as_top_level_api(
     base_sample_fn: Callable,
     probability_path_logdensity_fn: Callable,
     num_samples: int = 1,
+    delta_t: float = 0.005,
 ):
     def init_fn(params: PyTree) -> LFISState:
         return init(params, optimizer)
@@ -140,6 +146,7 @@ def as_top_level_api(
             static=static,
             base_sample_fn=base_sample_fn,
             num_samples=num_samples,
+            delta_t=delta_t,
         )
     
     return LFISAlgorithm(init_fn, step_fn, sample_fn)

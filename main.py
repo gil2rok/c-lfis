@@ -14,7 +14,7 @@ from utils import compute_1D_wasserstein_distance, Velocity
 
 
 jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
-dim = 2
+dim = 2 # prev: 2
 
 
 def base_logdensity_fn(x: Array) -> Scalar:
@@ -27,6 +27,25 @@ def base_sample_fn(rng_key: Key, num_samples: int = 1) -> Array:
     )
 
 
+def target_logdensity_fn(x: Array) -> Scalar:
+    scale_param, latent_params = jnp.split(x, [1], axis=-1)
+    scale_logpdf = jsp.stats.norm.logpdf(scale_param, loc=0, scale=3) # shape (num_samples, 1)
+    latent_logpdf = jsp.stats.norm.logpdf(
+        latent_params, loc=0, scale=jnp.exp(scale_param / 2)
+    ) # shape (num_samples, dim - 1)
+    return scale_logpdf.squeeze() + jnp.sum(latent_logpdf, axis=-1) # shape ()
+
+
+def target_sample_fn(rng_key: Key, num_samples: int = 1) -> Array:
+    scale_key, latent_key = jr.split(rng_key)
+    scale_param = jr.normal(scale_key, shape=(num_samples, 1)) * 3 # shape (num_samples, 1)
+    latent_params = jr.normal(
+        latent_key, shape=(num_samples, dim - 1)
+    ) * jnp.exp(scale_param / 2) # shape (num_samples, dim - 1)
+    return jnp.concatenate([scale_param, latent_params], axis=-1) # shape (num_samples, dim)
+
+
+"""
 def target_logdensity_fn(x: Array) -> Scalar:
     assert x.shape[-1] == 2 
     m1 = jsp.stats.multivariate_normal.logpdf(x, jnp.array([2.0, 2.0]), jnp.eye(2))
@@ -51,6 +70,7 @@ def target_sample_fn(rng_key, num_samples=1):
     one_hot_categories = jax.nn.one_hot(categories, num_classes=4)  # shape (num_samples, num_mixtures)
     one_hot_expanded = jnp.expand_dims(one_hot_categories, axis=-1)  # shape (num_samples, num_mixtures, 1)
     return jnp.sum(mixtures * one_hot_expanded, axis=1)  # shape (num_samples, dim)
+"""
 
 
 def probability_path_logdensity_fn(x: Array, time: Scalar) -> Scalar:
@@ -80,18 +100,25 @@ def compute_metrics(rng_key, lfis, state, info):
     )
 
 
-def main(seed: int, num_train_steps: int, num_samples: int):
+def main(
+    seed: int, 
+    num_train_steps: int, 
+    num_samples: int, 
+    learning_rate: float, 
+    delta_t: float
+):
     rng_key = jr.key(seed)
     rng_key, nn_key = jr.split(rng_key, 2)
     velocity = Velocity(in_size=dim + 1, out_size=dim, key=nn_key)
     params, static = eqx.partition(velocity, eqx.is_inexact_array)
-    optimizer = optax.adam(1e-3)
+    optimizer = optax.adam(learning_rate)
     lfis = as_top_level_api(
         optimizer=optimizer,
         static=static,
         base_sample_fn=base_sample_fn,
         probability_path_logdensity_fn=probability_path_logdensity_fn,
         num_samples=num_samples,
+        delta_t=delta_t,
     )
     state = lfis.init(params)
 
@@ -104,13 +131,18 @@ def main(seed: int, num_train_steps: int, num_samples: int):
 if __name__ == "__main__":
     seed = 12345
     num_train_steps = 500
-    num_samples = 10000
+    num_samples = 10_000
+    learning_rate = 1e-3
+    delta_t = 0.005
+    
     wandb.init(
         project="lfis",
         config={
             "seed": seed,
             "num_train_steps": num_train_steps,
             "num_samples": num_samples,
+            "learning_rate": learning_rate,
+            "delta_t": delta_t,
         },
     )
-    main(seed, num_train_steps, num_samples)
+    main(seed, num_train_steps, num_samples, learning_rate, delta_t)
