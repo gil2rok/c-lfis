@@ -89,13 +89,13 @@ def sample(
         euler_step, in_axes=(None, 0, None, None)
     )
     
-    def body_fn(time, carry, delta_t):
+    def body_fn(time: Scalar, carry: Array, delta_t: float) -> Array:
         """Apply numerical integration step from time t to time t + delta_t."""
         x_t = carry
         x_t = vmap_numerical_integration_step(velocity, x_t, time, delta_t)
         return x_t
     
-    def body_fn_wrapper(time_idx, carry):
+    def body_fn_wrapper(time_idx: int, carry: Array) -> Array:
         """Convert time index to time and handle adaptive final integration step.
         
         Each step for numerical integration is of size delta_t, except for the last 

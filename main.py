@@ -10,11 +10,11 @@ import seaborn as sns
 from jaxtyping import Array, Key, Scalar
 
 from lfis import as_top_level_api
-from utils import compute_1D_wasserstein_distance, Velocity
+from utils import marginal_wasserstein, sinkhorn_wasserstein, Velocity
 
 
 jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
-dim = 2 # prev: 2
+dim = 2
 
 
 def base_logdensity_fn(x: Array) -> Scalar:
@@ -79,20 +79,27 @@ def probability_path_logdensity_fn(x: Array, time: Scalar) -> Scalar:
     return (1 - time) * base_logdensity_fn(x) + time * target_logdensity_fn(x)
 
 
-def compute_metrics(rng_key, lfis, state, info):
+def compute_metrics(rng_key, idx, lfis, state, info):
     num_samples = info.x_t.shape[0]
     target_key, target_key2, approx_key = jr.split(rng_key, 3)
     target_samples = target_sample_fn(target_key, num_samples)
     target_samples2 = target_sample_fn(target_key2, num_samples)
     approx_samples = lfis.sample(approx_key, 1.0, state.params)
-    true_wass = compute_1D_wasserstein_distance(target_samples, target_samples2)
-    approx_wass = compute_1D_wasserstein_distance(target_samples, approx_samples)
+    true_wass = marginal_wasserstein(target_samples, target_samples2)
+    approx_wass = marginal_wasserstein(target_samples, approx_samples)
     plt.clf()
+    
+    true_wass2 = sinkhorn_wasserstein(target_samples, target_samples2)
+    approx_wass2 = sinkhorn_wasserstein(target_samples, approx_samples)
+    
     figure = sns.scatterplot(x=approx_samples[:, 0], y=approx_samples[:, 1], alpha=0.5)
     wandb.log(
-        {
-            "true_wass": true_wass,
-            "approx_wass": approx_wass,
+        step=idx,
+        data={
+            "Marginal_Wass_True": true_wass,
+            "Marginal_Wass_Approx": approx_wass,
+            "Sinkhorn_Wass_True": true_wass2,
+            "Sinkhorn_Wass_Approx": approx_wass2,
             "approx_samples": wandb.Image(figure.get_figure()),
             "time": info.time,
             "loss": info.loss,
@@ -105,11 +112,12 @@ def main(
     num_train_steps: int, 
     num_samples: int, 
     learning_rate: float, 
-    delta_t: float
+    delta_t: float,
+    encode_time: bool,
 ):
     rng_key = jr.key(seed)
     rng_key, nn_key = jr.split(rng_key, 2)
-    velocity = Velocity(in_size=dim + 1, out_size=dim, key=nn_key)
+    velocity = Velocity(logdensity_dim=dim, key=nn_key, encode_time=encode_time)
     params, static = eqx.partition(velocity, eqx.is_inexact_array)
     optimizer = optax.adam(learning_rate)
     lfis = as_top_level_api(
@@ -125,15 +133,17 @@ def main(
     for i in range(num_train_steps):
         time_key, metrics_key = jr.split(jr.fold_in(rng_key, i))
         state, info = lfis.step(time_key, state)
-        compute_metrics(metrics_key, lfis, state, info)
+        if i % 10 == 0:
+            compute_metrics(metrics_key, i, lfis, state, info)
 
 
 if __name__ == "__main__":
     seed = 12345
     num_train_steps = 500
-    num_samples = 10_000
+    num_samples = 1_000
     learning_rate = 1e-3
     delta_t = 0.005
+    encode_time = False
     
     wandb.init(
         project="lfis",
@@ -143,6 +153,7 @@ if __name__ == "__main__":
             "num_samples": num_samples,
             "learning_rate": learning_rate,
             "delta_t": delta_t,
+            "encode_time": encode_time,
         },
     )
-    main(seed, num_train_steps, num_samples, learning_rate, delta_t)
+    main(seed, num_train_steps, num_samples, learning_rate, delta_t, encode_time)

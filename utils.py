@@ -1,6 +1,8 @@
 from typing import Callable
 
 import jax
+import optax
+import ott
 import equinox as eqx
 import jax.numpy as jnp
 from jaxtyping import Array, Key, PyTree, Scalar
@@ -17,17 +19,37 @@ def divergence(f: Callable) -> Callable:
     return lambda x: jnp.trace(jax.jacobian(f)(x))
 
 
-def compute_1D_wasserstein_distance(X, Y):
-    """Efficiently compute 1D Wasserstein distance between two point clouds."""
+@jax.jit
+def marginal_wasserstein(X: Array, Y: Array) -> Array:
+    """Compute marginal Wasserstein distance between X and Y in O(nlogn).
+    
+    See https://en.wikipedia.org/wiki/Wasserstein_metric#One_dimension.
+    """
     return jnp.mean(jnp.abs(jnp.sort(X, axis=0) - jnp.sort(Y, axis=0)))
 
 
-def euler_step(f, x, time, delta_t):
+@jax.jit
+def hungarian_wasserstein(X: Array, Y: Array) -> Array:
+    """Compute exact Wasserstein distance between X and Y in O(n^3) time."""
+    displacement = jnp.expand_dims(X, axis=1) - jnp.expand_dims(Y, axis=0)
+    cost_matrix = jnp.linalg.norm(displacement, ord=2, axis=-1)
+    i, j = optax.assignment.hungarian_algorithm(cost_matrix)
+    return cost_matrix[i, j].sum()
+
+
+@jax.jit
+def sinkhorn_wasserstein(X: Array, Y: Array) -> Array:
+    geom = ott.geometry.pointcloud.PointCloud(X, Y, epsilon=1e-2)
+    ot = ott.solvers.linear.solve(geom)
+    return ot.primal_cost
+
+
+def euler_step(f: Callable, x: Array, time: Array, delta_t: float) -> Array:
     """Perform a single Euler step for the ODE dx/dt = f(x, t)."""
     return x + delta_t * f(x, time)
 
 
-def runge_kutta_step(f, x, time, delta_t):
+def runge_kutta_step(f: Callable, x: Array, time: Array, delta_t: float) -> Array:
     """Perform a single Runge-Kutta step for the ODE dx/dt = f(x, t)."""
     k1 = f(x, time)
     k2 = f(x + 0.5 * delta_t * k1, time + 0.5 * delta_t)
@@ -60,35 +82,52 @@ def continuity_error(
 
 
 class Velocity(eqx.Module):
-    """Wrapper class for eqx.nn.MLP to allow input of two arguments instead of one. 
+    """Neural velocity field with optional Fourier time encoding.
     
     This velocity MLP operates on both location x and time t. Instead of concatenating
     them as a single input, we pass them as separate arguments to the MLP. This is 
     helpful for (1) better semantics and (2) easier to differentiate with respect to 
     location x and time t separately.
     """
-    mlp: eqx.nn.MLP
+    network: eqx.nn.MLP
+    embedding_dim: int
+    max_freq: float
+    encode_time: bool
     
     def __init__(
         self, 
-        in_size: int, 
-        out_size: int, 
-        width_size: int = 256, # previously 256
-        depth: int = 8, # previously 8
+        logdensity_dim: int,
+        hidden_dim: int = 256,
+        num_layers: int = 8,
+        embedding_dim: int = 10,
+        max_freq: float = 10.0,
+        encode_time: bool = True,
         *,
         key: Key
     ):
-        self.mlp = eqx.nn.MLP(
-            in_size=in_size,
-            out_size=out_size,
-            width_size=width_size,
-            depth=depth,
+        time_dim = 2 * embedding_dim if encode_time else 1
+        self.network = eqx.nn.MLP(
+            in_size=logdensity_dim + time_dim,
+            out_size=logdensity_dim,
+            width_size=hidden_dim,
+            depth=num_layers,
             key=key,
         )
+        self.embedding_dim = embedding_dim
+        self.max_freq = max_freq
+        self.encode_time = encode_time
         
     def __call__(self, x: Array, time: Scalar) -> Array:
-        # TODO: confirm expand_dims along axis=-1 (instead of axis=0)
-        expanded_time = jnp.expand_dims(time, axis=-1) # ensures vmap-compatible concatenation
-        inputs = jnp.concatenate([x, expanded_time], axis=-1)
-        return self.mlp(inputs)
+        """Compute velocity at position x and time t."""
+        time_features = (
+            self._encode_time(time) if self.encode_time else jnp.atleast_1d(time)
+        )
+        inputs = jnp.concatenate([x, time_features], axis=-1)
+        return self.network(inputs)
 
+
+    def _encode_time(self, time: float) -> Array:
+        """Transform time to Fourier features for better expressivity."""
+        freqs = jnp.geomspace(1.0, self.max_freq, self.embedding_dim)
+        phases = jnp.outer(jnp.atleast_1d(time), freqs).squeeze() # shape (batch_size, num_freqs)
+        return jnp.concatenate([jnp.sin(phases), jnp.cos(phases)], axis=-1) # shape (batch_size, num_freqs * 2,)
