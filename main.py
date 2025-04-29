@@ -14,38 +14,37 @@ from utils import marginal_wasserstein, sinkhorn_wasserstein, Velocity
 
 
 jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
-dim = 2
+dim = 10
 
 
 def base_logdensity_fn(x: Array) -> Scalar:
     return jsp.stats.multivariate_normal.logpdf(x, jnp.zeros(dim), jnp.eye(dim))
 
 
-def base_sample_fn(rng_key: Key, num_samples: int = 1) -> Array:
-    return jr.multivariate_normal(
-        rng_key, jnp.zeros(dim), jnp.eye(dim), (num_samples,)
-    )
+def base_sample_fn(rng_key: Key) -> Array:
+    return jr.multivariate_normal(rng_key, jnp.zeros(dim), jnp.eye(dim))
 
 
 def target_logdensity_fn(x: Array) -> Scalar:
     scale_param, latent_params = jnp.split(x, [1], axis=-1)
-    scale_logpdf = jsp.stats.norm.logpdf(scale_param, loc=0, scale=3) # shape (num_samples, 1)
+    scale_logpdf = jsp.stats.norm.logpdf(scale_param, loc=0, scale=3) # shape (,)
     latent_logpdf = jsp.stats.norm.logpdf(
         latent_params, loc=0, scale=jnp.exp(scale_param / 2)
-    ) # shape (num_samples, dim - 1)
+    ) # shape (dim - 1,)
     return scale_logpdf.squeeze() + jnp.sum(latent_logpdf, axis=-1) # shape ()
 
 
-def target_sample_fn(rng_key: Key, num_samples: int = 1) -> Array:
+def target_sample_fn(rng_key: Key) -> Array:
     scale_key, latent_key = jr.split(rng_key)
-    scale_param = jr.normal(scale_key, shape=(num_samples, 1)) * 3 # shape (num_samples, 1)
+    scale_param = jr.normal(scale_key, shape=(1,)) * 3 # shape (1,)
     latent_params = jr.normal(
-        latent_key, shape=(num_samples, dim - 1)
-    ) * jnp.exp(scale_param / 2) # shape (num_samples, dim - 1)
-    return jnp.concatenate([scale_param, latent_params], axis=-1) # shape (num_samples, dim)
+        latent_key, shape=(dim - 1)
+    ) * jnp.exp(scale_param / 2) # shape (dim - 1,)
+    return jnp.concatenate([scale_param, latent_params], axis=-1) # shape (dim,)
 
 
 """
+# TODO: remove num_samples
 def target_logdensity_fn(x: Array) -> Scalar:
     assert x.shape[-1] == 2 
     m1 = jsp.stats.multivariate_normal.logpdf(x, jnp.array([2.0, 2.0]), jnp.eye(2))
@@ -82,9 +81,12 @@ def probability_path_logdensity_fn(x: Array, time: Scalar) -> Scalar:
 def compute_metrics(rng_key, idx, lfis, state, info):
     num_samples = info.x_t.shape[0]
     target_key, target_key2, approx_key = jr.split(rng_key, 3)
-    target_samples = target_sample_fn(target_key, num_samples)
-    target_samples2 = target_sample_fn(target_key2, num_samples)
-    approx_samples = lfis.sample(approx_key, 1.0, state.params)
+    repeat_key_fn = lambda key: jr.split(key, num_samples)
+    target_samples = jax.vmap(target_sample_fn)(repeat_key_fn(target_key))
+    target_samples2 = jax.vmap(target_sample_fn)(repeat_key_fn(target_key2))
+    approx_samples = jax.vmap(lfis.sample, in_axes=(0, None, None))(
+        repeat_key_fn(approx_key), 1.0, state.params
+    )
     true_wass = marginal_wasserstein(target_samples, target_samples2)
     approx_wass = marginal_wasserstein(target_samples, approx_samples)
     plt.clf()
@@ -101,7 +103,7 @@ def compute_metrics(rng_key, idx, lfis, state, info):
             "Sinkhorn_Wass_True": true_wass2,
             "Sinkhorn_Wass_Approx": approx_wass2,
             "approx_samples": wandb.Image(figure.get_figure()),
-            "time": info.time,
+            "time": wandb.Histogram(info.time),
             "loss": info.loss,
         }
     )
@@ -110,7 +112,8 @@ def compute_metrics(rng_key, idx, lfis, state, info):
 def main(
     seed: int, 
     num_train_steps: int, 
-    num_samples: int, 
+    num_samples: int,
+    num_unique_time: int,
     learning_rate: float, 
     delta_t: float,
     encode_time: bool,
@@ -126,21 +129,23 @@ def main(
         base_sample_fn=base_sample_fn,
         probability_path_logdensity_fn=probability_path_logdensity_fn,
         num_samples=num_samples,
+        num_unique_time=num_unique_time,
         delta_t=delta_t,
     )
     state = lfis.init(params)
 
-    for i in range(num_train_steps):
-        time_key, metrics_key = jr.split(jr.fold_in(rng_key, i))
+    for idx in range(num_train_steps):
+        time_key, metrics_key = jr.split(jr.fold_in(rng_key, idx))
         state, info = lfis.step(time_key, state)
-        if i % 10 == 0:
-            compute_metrics(metrics_key, i, lfis, state, info)
+        if idx % 10 == 0:
+            compute_metrics(metrics_key, idx, lfis, state, info)
 
 
 if __name__ == "__main__":
     seed = 12345
-    num_train_steps = 500
-    num_samples = 1_000
+    num_train_steps = 5000
+    num_samples = 10_000
+    num_unique_time = 100
     learning_rate = 1e-3
     delta_t = 0.005
     encode_time = False
@@ -151,9 +156,18 @@ if __name__ == "__main__":
             "seed": seed,
             "num_train_steps": num_train_steps,
             "num_samples": num_samples,
+            "num_unique_time": num_unique_time,
             "learning_rate": learning_rate,
             "delta_t": delta_t,
             "encode_time": encode_time,
         },
     )
-    main(seed, num_train_steps, num_samples, learning_rate, delta_t, encode_time)
+    main(
+        seed, 
+        num_train_steps, 
+        num_samples, 
+        num_unique_time, 
+        learning_rate, 
+        delta_t, 
+        encode_time
+    )

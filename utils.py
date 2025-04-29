@@ -39,6 +39,7 @@ def hungarian_wasserstein(X: Array, Y: Array) -> Array:
 
 @jax.jit
 def sinkhorn_wasserstein(X: Array, Y: Array) -> Array:
+    """Compute approximate Wasserstein distance between X and Y in O(n^2)."""
     geom = ott.geometry.pointcloud.PointCloud(X, Y, epsilon=1e-2)
     ot = ott.solvers.linear.solve(geom)
     return ot.primal_cost
@@ -61,24 +62,24 @@ def runge_kutta_step(f: Callable, x: Array, time: Array, delta_t: float) -> Arra
 def continuity_error(
     params: PyTree,
     static: PyTree,
-    x_t: Array,
-    time: Scalar,
+    x_t: Array, # shape (num_samples, dim)
+    time: Array, # shape (num_samples,)
     probability_path_logdensity_fn: Callable
 ) -> Array:
     """Compute error in continuity equation at time t for multiple points x_t ~ p_t."""
     velocity = eqx.combine(params, static)
 
-    def vmap_me_plz(x_t: Array, time: Scalar) -> tuple:
+    def vmap_me_plz(x_t: Array, time: Array) -> tuple:
         """Clean way to batch multiple computations over `num_samples`."""
         vel = velocity(x_t, time) # shape (dim,)
         div = divergence(lambda x: velocity(x, time))(x_t)  # shape ()
         score = jax.grad(probability_path_logdensity_fn, argnums=0)(x_t, time)  # shape (dim,)
-        time_partial = jax.grad(probability_path_logdensity_fn, argnums=1)(x_t, time)  # shape ()
-        return vel, div, score, time_partial
+        log_time_partial = jax.grad(probability_path_logdensity_fn, argnums=1)(x_t, time)  # shape ()
+        return vel, div, score, log_time_partial
 
-    vel, div, score, time_partial = jax.vmap(vmap_me_plz, in_axes=(0, None))(x_t, time)
-    partial_t_Z = jnp.mean(time_partial, axis=0) # shape (num_samples,)
-    return div + jnp.vecdot(vel, score) + time_partial - partial_t_Z # shape (num_samples,)
+    vel, div, score, log_time_partial = jax.vmap(vmap_me_plz, in_axes=(0, 0))(x_t, time)
+    log_partial_t_Z = jnp.mean(log_time_partial, axis=0) # shape (num_samples,) # TODO: incorrect!
+    return div + jnp.vecdot(vel, score) + log_time_partial - log_partial_t_Z # shape (num_samples,)
 
 
 class Velocity(eqx.Module):

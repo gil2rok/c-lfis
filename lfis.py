@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Callable, NamedTuple
 
 import jax
@@ -24,7 +25,7 @@ class LFISState(NamedTuple):
 
 class LFISInfo(NamedTuple):
     loss: Array
-    time: Scalar
+    time: Array
     x_t: Array
 
 
@@ -42,16 +43,17 @@ def step(
     base_sample_fn: Callable,
     probability_path_logdensity_fn: Callable,
     num_samples: int = 1,
+    num_unique_time: int = 100,
 ) -> tuple[LFISState, LFISInfo]:
     time_key, sample_key = jr.split(rng_key)
-    time = jr.beta(time_key, 4, 4) # shape ()
-    x_t = sample(
-        rng_key=sample_key,
-        time=time,
-        params=state.params, 
-        static=static, 
-        base_sample_fn=base_sample_fn, 
-        num_samples=num_samples, 
+    unique_time = jr.beta(time_key, 4, 4, shape=(num_unique_time,)) # shape (num_unique_time,)
+    time = jnp.repeat(unique_time, num_samples // num_unique_time) # shape (num_samples,)
+    x_t = jax.vmap(sample, in_axes=(0, 0, None, None, None))(
+        jr.split(sample_key, num_samples),
+        time,
+        state.params,
+        static,
+        base_sample_fn,
     )  # shape (num_samples, dim)
         
     def continuity_error_loss_fn(params: PyTree) -> Scalar:
@@ -75,24 +77,20 @@ def step(
 
 def sample(
     rng_key: Key,
-    time: Scalar,
+    time: Array,
     params: PyTree,
     static: PyTree,
     base_sample_fn: Callable,
-    num_samples: int = 1,
     delta_t: Scalar = 0.005,
 ) -> Array:
-    """Evolve samples from x_0 ~ p_0 to x_t ~ p_t using neural velocity field."""
-    x_0 = base_sample_fn(rng_key, num_samples) # shape (num_samples, dim)
+    """Evolve a single sample from x_0 ~ p_0 to x_t ~ p_t using neural velocity field."""
+    x_0 = base_sample_fn(rng_key) # shape (dim,)
     velocity = eqx.combine(params, static)
-    vmap_numerical_integration_step = jax.vmap(
-        euler_step, in_axes=(None, 0, None, None)
-    )
-    
+  
     def body_fn(time: Scalar, carry: Array, delta_t: float) -> Array:
-        """Apply numerical integration step from time t to time t + delta_t."""
+        """Apply numerical integration step from `time` to `time + delta_t`."""
         x_t = carry
-        x_t = vmap_numerical_integration_step(velocity, x_t, time, delta_t)
+        x_t = euler_step(velocity, x_t, time, delta_t)
         return x_t
     
     def body_fn_wrapper(time_idx: int, carry: Array) -> Array:
@@ -122,6 +120,7 @@ def as_top_level_api(
     base_sample_fn: Callable,
     probability_path_logdensity_fn: Callable,
     num_samples: int = 1,
+    num_unique_time: int = 100,
     delta_t: float = 0.005,
 ):
     def init_fn(params: PyTree) -> LFISState:
@@ -136,6 +135,7 @@ def as_top_level_api(
             base_sample_fn=base_sample_fn, 
             probability_path_logdensity_fn=probability_path_logdensity_fn, 
             num_samples=num_samples,
+            num_unique_time=num_unique_time,
         )
     
     def sample_fn(rng_key: Key, time: Scalar, params: PyTree) -> Array:
@@ -145,7 +145,6 @@ def as_top_level_api(
             params=params,
             static=static,
             base_sample_fn=base_sample_fn,
-            num_samples=num_samples,
             delta_t=delta_t,
         )
     
