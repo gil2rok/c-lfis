@@ -44,7 +44,6 @@ def target_sample_fn(rng_key: Key) -> Array:
 
 
 """
-# TODO: remove num_samples
 def target_logdensity_fn(x: Array) -> Scalar:
     assert x.shape[-1] == 2 
     m1 = jsp.stats.multivariate_normal.logpdf(x, jnp.array([2.0, 2.0]), jnp.eye(2))
@@ -57,6 +56,7 @@ def target_logdensity_fn(x: Array) -> Scalar:
     return jsp.special.logsumexp(log_mixtures + log_weights)
 
 
+# TODO: remove num_samples
 def target_sample_fn(rng_key, num_samples=1):
     m1_key, m2_key, m3_key, m4_key, cat_key = jr.split(rng_key, 5)
     m1 = jr.multivariate_normal(m1_key, jnp.array([2.0, 2.0]), jnp.eye(2), shape=(num_samples,)) # shape (num_samples, dim)
@@ -79,7 +79,7 @@ def probability_path_logdensity_fn(x: Array, time: Scalar) -> Scalar:
 
 
 def compute_metrics(rng_key, idx, lfis, state, info):
-    num_samples = info.x_t.shape[0]
+    num_samples = 10_000 # info.x_t.shape[0]
     target_key, target_key2, approx_key = jr.split(rng_key, 3)
     repeat_key_fn = lambda key: jr.split(key, num_samples)
     target_samples = jax.vmap(target_sample_fn)(repeat_key_fn(target_key))
@@ -144,7 +144,7 @@ def main(
 if __name__ == "__main__":
     seed = 12345
     num_train_steps = 5000
-    num_samples = 10_000
+    num_samples = 100_000
     num_unique_time = 100
     learning_rate = 1e-3
     delta_t = 0.005

@@ -1,4 +1,3 @@
-from functools import partial
 from typing import Callable, NamedTuple
 
 import jax
@@ -45,23 +44,29 @@ def step(
     num_samples: int = 1,
     num_unique_time: int = 100,
 ) -> tuple[LFISState, LFISInfo]:
+    """Perform a single step of the LFIS algorithm."""
+    samples_per_unique = num_samples // num_unique_time
     time_key, sample_key = jr.split(rng_key)
-    unique_time = jr.beta(time_key, 4, 4, shape=(num_unique_time,)) # shape (num_unique_time,)
-    time = jnp.repeat(unique_time, num_samples // num_unique_time) # shape (num_samples,)
-    x_t = jax.vmap(sample, in_axes=(0, 0, None, None, None))(
-        jr.split(sample_key, num_samples),
-        time,
-        state.params,
-        static,
-        base_sample_fn,
-    )  # shape (num_samples, dim)
-        
+    unique_time = jr.beta(time_key, 4, 4, shape=(num_unique_time)) # shape (num_unique_time,)
+    time = jnp.broadcast_to(
+        jnp.expand_dims(unique_time, axis=1), (num_unique_time, samples_per_unique)
+    ) # shape (num_unique_time, samples_per_unique)
+    sample_keys_flat = jr.split(sample_key, num_unique_time * samples_per_unique)
+    sample_keys = jnp.reshape(sample_keys_flat, (num_unique_time, samples_per_unique)) # shape (num_unique_time, samples_per_unique)
+    sample_base = lambda key, t: sample(key, t, state.params, static, base_sample_fn)
+    sample_within_time = jax.vmap(sample_base, in_axes=(0, 0))
+    sample_across_times = jax.vmap(sample_within_time, in_axes=(0, 0))
+    x_t = sample_across_times(sample_keys, time) # shape (num_unique_time, samples_per_unique, dim)
+
     def continuity_error_loss_fn(params: PyTree) -> Scalar:
-        """Mean squared error in continuity equation at time t."""
-        eps = continuity_error(
-            params, static, x_t, time, probability_path_logdensity_fn
+        """Mean squared error (MSE) in continuity equation at time t."""
+        error_base = lambda x, t: continuity_error(
+            params, static, x, t, probability_path_logdensity_fn
         )
-        return jnp.mean(eps ** 2, axis=0)
+        error_across_times = jax.vmap(error_base, in_axes=(0, 0))
+        eps = error_across_times(x_t, unique_time) # shape (num_unique_time, samples_per_unique)
+        # Compute MSE across samples for each time, then mean across all times
+        return jnp.mean(jnp.mean(eps ** 2, axis=1))
 
     loss, grads = jax.value_and_grad(continuity_error_loss_fn)(state.params)
     updates, new_opt_state = optimizer.update(grads, state.opt_state)
